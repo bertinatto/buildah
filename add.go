@@ -1,7 +1,10 @@
 package buildah
 
 import (
+	"fmt"
 	"io"
+	"io/ioutil"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -15,6 +18,11 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
+
+//AddAndCopyOptions holds options for add and copy commands.
+type AddAndCopyOptions struct {
+	Chown [2]int
+}
 
 // addURL copies the contents of the source URL to the destination.  This is
 // its own function so that deferred closes happen after we're done pulling
@@ -58,8 +66,9 @@ func addURL(destination, srcurl string) error {
 // Add copies the contents of the specified sources into the container's root
 // filesystem, optionally extracting contents of local files that look like
 // non-empty archives.
-func (b *Builder) Add(destination string, extract bool, source ...string) error {
+func (b *Builder) Add(destination string, extract bool, options AddAndCopyOptions, source ...string) error {
 	mountPoint, err := b.Mount(b.MountLabel)
+	fmt.Printf("----------> %v\n", options)
 	if err != nil {
 		return err
 	}
@@ -69,6 +78,7 @@ func (b *Builder) Add(destination string, extract bool, source ...string) error 
 		}
 	}()
 	dest := mountPoint
+
 	if destination != "" && filepath.IsAbs(destination) {
 		dest = filepath.Join(dest, destination)
 	} else {
@@ -77,6 +87,7 @@ func (b *Builder) Add(destination string, extract bool, source ...string) error 
 		}
 		dest = filepath.Join(dest, b.WorkDir(), destination)
 	}
+	log.Println(dest)
 	// If the destination was explicitly marked as a directory by ending it
 	// with a '/', create it so that we can be sure that it's a directory,
 	// and any files we're copying will be placed in the directory.
@@ -90,6 +101,7 @@ func (b *Builder) Add(destination string, extract bool, source ...string) error 
 		return errors.Errorf("%q already exists, but is not a subdirectory)", filepath.Dir(dest))
 	}
 	// Now look at the destination itself.
+
 	destfi, err := os.Stat(dest)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -161,6 +173,11 @@ func (b *Builder) Add(destination string, extract bool, source ...string) error 
 				if err := copyFileWithTar(gsrc, d); err != nil {
 					return errors.Wrapf(err, "error copying %q to %q", gsrc, d)
 				}
+				passwdFile := filepath.Join(mountPoint, "/etc/passwd")
+				log.Println(passwdFile)
+				dat, _ := ioutil.ReadFile(passwdFile)
+				fmt.Print(string(dat))
+				os.Chown(d, options.Chown[0], options.Chown[1])
 				continue
 			}
 			// We're extracting an archive into the destination directory.
