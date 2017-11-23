@@ -1,15 +1,13 @@
 package buildah
 
 import (
-	"fmt"
 	"io"
-	"io/ioutil"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -21,7 +19,8 @@ import (
 
 //AddAndCopyOptions holds options for add and copy commands.
 type AddAndCopyOptions struct {
-	Chown [2]int
+	// These are strings because I want to accept both ids and names.
+	Chown [2]string
 }
 
 // addURL copies the contents of the source URL to the destination.  This is
@@ -68,7 +67,6 @@ func addURL(destination, srcurl string) error {
 // non-empty archives.
 func (b *Builder) Add(destination string, extract bool, options AddAndCopyOptions, source ...string) error {
 	mountPoint, err := b.Mount(b.MountLabel)
-	fmt.Printf("----------> %v\n", options)
 	if err != nil {
 		return err
 	}
@@ -78,7 +76,6 @@ func (b *Builder) Add(destination string, extract bool, options AddAndCopyOption
 		}
 	}()
 	dest := mountPoint
-
 	if destination != "" && filepath.IsAbs(destination) {
 		dest = filepath.Join(dest, destination)
 	} else {
@@ -87,7 +84,6 @@ func (b *Builder) Add(destination string, extract bool, options AddAndCopyOption
 		}
 		dest = filepath.Join(dest, b.WorkDir(), destination)
 	}
-	log.Println(dest)
 	// If the destination was explicitly marked as a directory by ending it
 	// with a '/', create it so that we can be sure that it's a directory,
 	// and any files we're copying will be placed in the directory.
@@ -101,7 +97,6 @@ func (b *Builder) Add(destination string, extract bool, options AddAndCopyOption
 		return errors.Errorf("%q already exists, but is not a subdirectory)", filepath.Dir(dest))
 	}
 	// Now look at the destination itself.
-
 	destfi, err := os.Stat(dest)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -173,11 +168,24 @@ func (b *Builder) Add(destination string, extract bool, options AddAndCopyOption
 				if err := copyFileWithTar(gsrc, d); err != nil {
 					return errors.Wrapf(err, "error copying %q to %q", gsrc, d)
 				}
-				passwdFile := filepath.Join(mountPoint, "/etc/passwd")
-				log.Println(passwdFile)
-				dat, _ := ioutil.ReadFile(passwdFile)
-				fmt.Print(string(dat))
-				os.Chown(d, options.Chown[0], options.Chown[1])
+
+				// Set permissions. For now both uid and gid need to be set and they have to be numbers.
+				if options.Chown[0] != "" && options.Chown[1] != "" {
+					// TODO: figure out uid/id if user/group names was passed in instead of the real uid/gid.
+					uid, err := strconv.Atoi(options.Chown[0])
+					if err != nil {
+						return errors.Wrapf(err, "could not get uid %d", options.Chown[0])
+					}
+
+					gid, err := strconv.Atoi(options.Chown[1])
+					if err != nil {
+						return errors.Wrapf(err, "could not get gid %d", options.Chown[1])
+					}
+
+					if err := os.Chown(d, uid, gid); err != nil {
+						return errors.Wrapf(err, "error setting permissions")
+					}
+				}
 				continue
 			}
 			// We're extracting an archive into the destination directory.

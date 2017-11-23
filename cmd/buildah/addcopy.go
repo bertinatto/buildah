@@ -1,8 +1,6 @@
 package main
 
 import (
-	"os/user"
-	"strconv"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -70,31 +68,12 @@ func addAndCopyCmd(c *cli.Context, extractLocalArchives bool) error {
 	}
 
 	options := buildah.AddAndCopyOptions{}
-	chown := c.String("chown")
-	if chown != "" {
+	if chown := c.String("chown"); chown != "" {
 		r := strings.SplitN(chown, ":", 2)
-
-		if uid, err := strconv.Atoi(r[0]); err == nil {
-			options.Chown[0] = uid
-		} else {
-			u, err := user.Lookup(r[0])
-			if err != nil {
-				return errors.Wrap(err, "error parsing --chown")
-			}
-			userid, _ := strconv.Atoi(u.Uid)
-			options.Chown[0] = userid
+		if len(r) < 2 {
+			return errors.Errorf("incomplete chown data %q", chown)
 		}
-
-		if gid, err := strconv.Atoi(r[1]); err == nil {
-			options.Chown[1] = gid
-		} else {
-			g, err := user.LookupGroup(r[1])
-			if err != nil {
-				return errors.Wrap(err, "error parsing --chown")
-			}
-			groupid, _ := strconv.Atoi(g.Gid)
-			options.Chown[1] = groupid
-		}
+		copy(options.Chown[:], r)
 	}
 
 	err = builder.Add(dest, extractLocalArchives, options, args...)
