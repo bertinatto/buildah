@@ -1,12 +1,15 @@
 package buildah
 
 import (
+	"bufio"
+	"bytes"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -15,6 +18,12 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
+
+//AddAndCopyOptions holds options for add and copy commands.
+type AddAndCopyOptions struct {
+	User  string
+	Group string
+}
 
 // addURL copies the contents of the source URL to the destination.  This is
 // its own function so that deferred closes happen after we're done pulling
@@ -58,7 +67,7 @@ func addURL(destination, srcurl string) error {
 // Add copies the contents of the specified sources into the container's root
 // filesystem, optionally extracting contents of local files that look like
 // non-empty archives.
-func (b *Builder) Add(destination string, extract bool, source ...string) error {
+func (b *Builder) Add(destination string, extract bool, options AddAndCopyOptions, source ...string) error {
 	mountPoint, err := b.Mount(b.MountLabel)
 	if err != nil {
 		return err
@@ -69,6 +78,12 @@ func (b *Builder) Add(destination string, extract bool, source ...string) error 
 		}
 	}()
 	dest := mountPoint
+
+	uid, gid, err := findUserGroupIDs(mountPoint, options)
+	if err != nil {
+		return err
+	}
+
 	if destination != "" && filepath.IsAbs(destination) {
 		dest = filepath.Join(dest, destination)
 	} else {
@@ -118,6 +133,9 @@ func (b *Builder) Add(destination string, extract bool, source ...string) error 
 			if err := addURL(d, src); err != nil {
 				return err
 			}
+			if err := setOwner(d, uid, gid); err != nil {
+				return err
+			}
 			continue
 		}
 
@@ -146,6 +164,9 @@ func (b *Builder) Add(destination string, extract bool, source ...string) error 
 				if err := copyWithTar(gsrc, d); err != nil {
 					return errors.Wrapf(err, "error copying %q to %q", gsrc, d)
 				}
+				if err := setOwner(d, uid, gid); err != nil {
+					return err
+				}
 				continue
 			}
 			if !extract || !archive.IsArchivePath(gsrc) {
@@ -161,6 +182,10 @@ func (b *Builder) Add(destination string, extract bool, source ...string) error 
 				if err := copyFileWithTar(gsrc, d); err != nil {
 					return errors.Wrapf(err, "error copying %q to %q", gsrc, d)
 				}
+
+				if err := setOwner(d, uid, gid); err != nil {
+					return err
+				}
 				continue
 			}
 			// We're extracting an archive into the destination directory.
@@ -170,5 +195,96 @@ func (b *Builder) Add(destination string, extract bool, source ...string) error 
 			}
 		}
 	}
+	return nil
+}
+
+// findID reads a colon-separated file looking for a user/group and returns its ID.
+func findID(colonFile, name string) (int, error) {
+
+	file, err := os.Open(colonFile)
+	if err != nil {
+		return 0, errors.Wrapf(err, "error opening %q file", colonFile)
+	}
+	defer file.Close()
+
+	s := bufio.NewScanner(file)
+	for s.Scan() {
+		line := bytes.TrimSpace(s.Bytes())
+
+		// Skip comments and empty lines
+		if len(line) == 0 || line[0] == '#' {
+			continue
+		}
+
+		slice := bytes.Split(line, []byte(":"))
+		if string(slice[0]) == name {
+			uid, err := strconv.Atoi(string(slice[2]))
+			if err != nil {
+				return 0, errors.Wrapf(err, "error getting ID for %q", name)
+			}
+			return uid, nil
+		}
+	}
+	if err := s.Err(); err != nil {
+		return 0, err
+	}
+	return 0, errors.Errorf("error getting ID for %q", name)
+}
+
+// findUserGroupIDs gets the real uid and gid of a given AddAndCopyOptions.
+func findUserGroupIDs(mountPoint string, o AddAndCopyOptions) (int, int, error) {
+	var uid, gid int
+	if o.User != "" && o.Group != "" {
+		// Parse UID
+		if i, err := strconv.Atoi(o.User); err == nil {
+			uid = i
+		} else {
+			usersFile := filepath.Join(mountPoint, "/etc/passwd")
+			i, err := findID(usersFile, o.User)
+			if err != nil {
+				return 0, 0, errors.Wrapf(err, "error looking up user %q", o.User)
+			}
+			uid = i
+		}
+		// Parse GID
+		if i, err := strconv.Atoi(o.Group); err == nil {
+			gid = i
+		} else {
+			groupsFile := filepath.Join(mountPoint, "/etc/group")
+			i, err := findID(groupsFile, o.Group)
+			if err != nil {
+				return 0, 0, errors.Wrapf(err, "error looking up group %q", o.Group)
+			}
+			gid = i
+		}
+	}
+	return uid, gid, nil
+}
+
+// setOwner sets the uid and gid owners of a given path.
+// If path is a directory, recursively changes the owner.
+func setOwner(path string, uid, gid int) error {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return errors.Wrapf(err, "error reading %q", path)
+	}
+
+	if fi.IsDir() {
+		err := filepath.Walk(path, func(p string, info os.FileInfo, we error) error {
+			if err2 := os.Chown(p, uid, gid); err != nil {
+				return errors.Wrapf(err2, "error setting owner of %q", p)
+			}
+			return nil
+		})
+		if err != nil {
+			return errors.Wrapf(err, "error walking dir %q to set owner", path)
+		}
+		return nil
+	}
+
+	if err := os.Chown(path, uid, gid); err != nil {
+		return errors.Wrapf(err, "error setting owner of %q", path)
+	}
+
 	return nil
 }
